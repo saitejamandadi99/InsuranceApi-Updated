@@ -1,0 +1,258 @@
+﻿using AutoMapper;
+using InsuranceApi.Config;
+using InsuranceApi.DTO;
+using InsuranceApi.Middleware;
+using InsuranceApi.Models;
+using InsuranceApi.Repositiries;
+using Microsoft.Data.SqlClient;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+using System.Security.Claims;
+
+namespace InsuranceApi.Services
+{
+    public class PolicyService : IPolicyService
+    {
+
+        private readonly IPolicyRepository _policyRepo;
+        private readonly ICustomerRepository _cusRepo;
+        private readonly IPolicyPlanRepository _planRepo;
+        private readonly IMapper _mapper;
+        private readonly ILogger<PolicyService> _logger;
+
+
+        public PolicyService(IPolicyRepository policyRepo, ICustomerRepository cusRepo, IPolicyPlanRepository planRepo, IMapper mapper, ILogger<PolicyService> logger)
+        {
+            _policyRepo = policyRepo;
+            _cusRepo = cusRepo;
+            _planRepo = planRepo;
+            _mapper = mapper;
+            _logger = logger;
+
+        }
+        public async Task<PolicyResponseDTO?> CancelPolicy(int policyId)
+        {
+
+            var existingPolicy = await _policyRepo.GetPolicyById(policyId);
+            if(existingPolicy == null)
+            {
+                throw new Exception("Policy does not exists");
+            }
+            if(existingPolicy.PolicyStatus == PolicyStatus.Cancelled)
+            {
+                throw new Exception("Policy is already cancelled");
+            }
+            existingPolicy.PolicyStatus = PolicyStatus.Cancelled;
+            await _policyRepo.UpdatePolicy(existingPolicy);
+            await _policyRepo.SaveChangesAsync();
+            return _mapper.Map<PolicyResponseDTO>(existingPolicy);
+        }
+
+        public async Task<IEnumerable<PolicyResponseDTO>> GetPoliciesByCustomerId(int customerId)
+        {
+            var policies = await _policyRepo.GetPoliciesByCustomerId(customerId);
+            return _mapper.Map<IEnumerable<PolicyResponseDTO>>(policies);
+        }
+
+        public async Task<IEnumerable<PolicyResponseDTO>> GetPoliciesByPlanId(int planId)
+        {
+            var policies = await _policyRepo.GetPoliciesByPlanId(planId);
+            return _mapper.Map<IEnumerable<PolicyResponseDTO>>(policies);
+        }
+
+        public async Task<PolicyResponseDTO?> GetPolicyById(int policyId)
+        {
+            var existingPolicy = await _policyRepo.GetPolicyById(policyId);
+            if (existingPolicy == null)
+            {
+                throw new Exception("Policy does not exists");
+            }
+            return _mapper.Map<PolicyResponseDTO>(existingPolicy);
+        }
+
+        public async Task<PolicyResponseDTO> IssuePolicy(AgentOrAdminPolicyIssueRequestDTO request)
+        {
+            var customer = await _cusRepo.GetCustomerById(request.CustomerId);
+            if (customer == null)
+            {
+                throw new Exception("Customer not exists");
+            }
+            
+
+            if (!IsCustomerProfileComplete(customer))
+            {
+                throw new Exception("Customer profile is incomplete.");
+            }
+
+            if (customer.User.ActiveStatus != ActiveStatus.Active)
+            {
+                throw new Exception("Customer is not active");
+            }
+
+            var plan = await _planRepo.GetPlanById(request.PlanId);
+            if (plan == null)
+            {
+                throw new Exception("plan not exists");
+            }
+            if (plan.ActiveStatus != ActiveStatus.Active)
+            {
+                throw new Exception("plan is not active");
+            }
+
+            var existingPolicies = await _policyRepo.GetPoliciesByCustomerId(customer.CustomerId);
+
+            if (existingPolicies.Any(p => p.PlanId == plan.PlanId))
+            {
+                throw new Exception("Customer has already subscribed to this policy plan.");
+            }
+
+            var addPolicy = new Policy
+            {
+                CustomerId = customer.CustomerId,
+                PlanId = plan.PlanId,
+                PolicyNumber =await GeneratePolicyNumber(),
+                StartDate = request.StartDate,
+                EndDate = request.StartDate.AddYears(plan.Duration),
+                PolicyStatus = PolicyStatus.PendingPayment,
+                TotalPremiumPaid = 0,
+                CreatedDate = DateTime.Now,
+                UpdatedDate = DateTime.Now,
+
+            };
+
+            try
+            {
+                var createdPolicy = await _policyRepo.CreatePolicy(addPolicy);
+                createdPolicy.Customer = customer;
+                createdPolicy.PolicyPlan = plan;
+                _logger.LogInformation("Policy '{PolicyNumber}' issued for customer '{CustomerId}'.", createdPolicy.PolicyNumber, customer.CustomerId);
+                return _mapper.Map<PolicyResponseDTO>(createdPolicy);
+            }
+            catch (DbUpdateException ex)
+            {
+                if (ex.InnerException is SqlException sqlEx && (sqlEx.Number == 2601 || sqlEx.Number == 2627)) //2601 -> for duplicate key in a unqiue index, 2627 -> violation of unique constraint. 
+                {
+                    throw new Exception("Customer has already subscribed to this policy plan.");
+                }
+
+                throw;
+            }
+        }
+
+        public async Task<PaginatedResponseDTO<PolicyResponseDTO>> ListPolicies(PaginationQueryDto query)
+        {
+            var policies = await _policyRepo.ListPolicies(query);
+            return new PaginatedResponseDTO<PolicyResponseDTO>
+            {
+                Records = _mapper.Map<IEnumerable<PolicyResponseDTO>>(policies.Records),
+                CurrentPage = policies.CurrentPage,
+                PageSize = policies.PageSize,
+                TotalRecords = policies.TotalRecords,
+                TotalPages = policies.TotalPages,
+                IsLastPage = policies.IsLastPage,
+                SortBy = policies.SortBy,
+                SortDirection = policies.SortDirection
+            };
+        }
+
+        public async Task<PolicyResponseDTO> PurchasePolicy(CustomerPolicyPurchaseRequestDTO request, ClaimsPrincipal user)
+        {
+            var userId = user.GetUserId();
+            var customer = await _cusRepo.GetCustomerByUserId(userId);
+            if(customer == null)
+            {
+                throw new Exception("Customer not exists");
+            }
+            if (customer.User.ActiveStatus != ActiveStatus.Active)
+            {
+                throw new Exception("Customer is not active");
+            }
+
+            if (!IsCustomerProfileComplete(customer))
+            {
+                throw new Exception("Customer profile is incomplete.");
+            }
+
+            var plan = await _planRepo.GetPlanById(request.PlanId);
+            if (plan == null)
+            {
+                throw new Exception("plan not exists");
+            }
+            if (plan.ActiveStatus != ActiveStatus.Active)
+            {
+                throw new Exception("plan is not active");
+            }
+
+            var existingPolicies = await _policyRepo.GetPoliciesByCustomerId(customer.CustomerId);
+
+            if (existingPolicies.Any(p => p.PlanId == plan.PlanId))
+            {
+                throw new Exception("You have already subscribed to this policy plan.");
+            }
+
+
+
+            var today = DateTime.Today;
+            if(request.StartDate.Date < today)
+            {
+                throw new Exception("Date cannot be in the past");
+            }
+
+            var addPolicy = new Policy
+            {
+                CustomerId = customer.CustomerId,
+                PlanId = plan.PlanId,
+                PolicyNumber = await GeneratePolicyNumber(),
+                StartDate = request.StartDate,
+                EndDate = request.StartDate.AddYears(plan.Duration),
+                PolicyStatus = PolicyStatus.PendingPayment,
+                TotalPremiumPaid = 0,
+                CreatedDate  = DateTime.Now,
+                UpdatedDate  = DateTime.Now,
+
+            };
+            try
+            {
+                var createdPolicy = await _policyRepo.CreatePolicy(addPolicy);
+                createdPolicy.Customer = customer;
+                createdPolicy.PolicyPlan = plan;
+                _logger.LogInformation("Customer '{CustomerId}' purchased policy '{PolicyNumber}'.", customer.CustomerId, createdPolicy.PolicyNumber);
+                return _mapper.Map<PolicyResponseDTO>(createdPolicy);
+            }
+            catch (DbUpdateException ex)
+            {
+                if (ex.InnerException is SqlException sqlEx && (sqlEx.Number == 2601 || sqlEx.Number == 2627))
+                {
+                    throw new Exception("Customer has already subscribed to this policy plan.");
+                }
+
+                throw;
+            }
+
+
+
+        }
+        public async Task<string> GeneratePolicyNumber()
+        {
+            string policyNumber;
+            do
+            {
+                policyNumber = Random.Shared.NextInt64(1000000000, 9999999999).ToString();
+            }
+            while (await _policyRepo.GetPolicyByPolicyNumber(policyNumber) != null);
+            return policyNumber; 
+
+        }
+
+        private bool IsCustomerProfileComplete(Customer customer)
+        {
+            return customer.DateOfBirth != default &&
+                   !string.IsNullOrWhiteSpace(customer.Address) &&
+                   !string.IsNullOrWhiteSpace(customer.City) &&
+                   !string.IsNullOrWhiteSpace(customer.State) &&
+                   !string.IsNullOrWhiteSpace(customer.Pincode) &&
+                   !string.IsNullOrWhiteSpace(customer.NomineeName) &&
+                   !string.IsNullOrWhiteSpace(customer.NomineeRelationship);
+        }
+    }
+}
