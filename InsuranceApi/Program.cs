@@ -49,6 +49,7 @@ namespace InsuranceApi
             builder.Services.AddScoped<IClaimRepository, ClaimRepository>();
             builder.Services.AddScoped<IClaimDocumentRepository, ClaimDocumentRepository>();
             builder.Services.AddScoped<IClaimStatusHistoryRepository, ClaimStatusHistoryRepository>();
+            builder.Services.AddScoped<IDashboardRepository, DashboardRepository>();
 
 
             builder.Services.AddScoped<ITokenService, TokenService>();
@@ -62,6 +63,7 @@ namespace InsuranceApi
             builder.Services.AddScoped<IClaimService, ClaimService>();
             builder.Services.AddScoped<IClaimStatusHistoryService, ClaimStatusHistoryService>();
             builder.Services.AddScoped<IClaimDocumentService, ClaimDocumentService>();
+            builder.Services.AddScoped<IDashboardService, DashboardService>();
 
             //json serialize 
             builder.Services.AddControllers().AddJsonOptions(options => { options.JsonSerializerOptions.ReferenceHandler = ReferenceHandler.IgnoreCycles;
