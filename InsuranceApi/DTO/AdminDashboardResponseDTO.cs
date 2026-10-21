@@ -8,6 +8,6 @@
         
         public decimal PendingClaimsAmount { get; set; }
 
-        public IEnumerable<DashboardClaimDTO> TopClaims { get; set; } = new List<DashboardClaimDTO>();
+        public IEnumerable<DashboardClaimDTO> TopClaims { get; set; }
     }
 }
